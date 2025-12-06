@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>JUKER NUKER — Mobile+ (PWA)</title>
+<meta name="theme-color" content="#0a0f1a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<style>
+  :root{ --ink:#e6edf3; --bg:#0a0f1a; --glass:#0d1428; --brd:#284a92; }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:#000;color:var(--ink);font-family:ui-sans-serif,system-ui,Inter,Roboto,Arial}
+  .wrap{position:fixed;inset:0;display:grid;grid-template-rows:auto 1fr;background:
+    radial-gradient(1400px 900px at 50% -260px,#101a33 0%,#070b12 60%,#000 100%)}
+  header{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;gap:8px}
+  .pill{font-variant-numeric:tabular-nums;background:#0a1330cc;border:1px solid var(--brd);border-radius:999px;padding:6px 10px;font-size:13px}
+  .right{display:flex;gap:8px;align-items:center}
+  .ib{background:#0a1330cc;border:1px solid var(--brd);border-radius:10px;width:36px;height:36px;display:grid;place-items:center}
+  .card{position:relative;margin:0 10px 10px 10px;border:1px solid #1a2f5a;border-radius:14px;background:linear-gradient(180deg,#0c1328,#070d20);box-shadow:0 20px 60px #000c,inset 0 0 60px #0a1330}
+  canvas{width:100%;height:100%;display:block;border-radius:12px;touch-action:none}
+  .ui{position:absolute;inset:0;pointer-events:none}
+  .dash{position:absolute;right:16px;bottom:calc(env(safe-area-inset-bottom,0) + 20px);pointer-events:auto;width:96px;height:96px;border-radius:50%;background:#10224a;border:2px solid #3358b6;color:#cfe8ff;font-weight:900}
+  .stick{position:absolute;left:16px;bottom:calc(env(safe-area-inset-bottom,0) + 20px);width:180px;height:180px;border-radius:50%;background:#0a133066;border:2px solid #1f3f7a;pointer-events:auto;touch-action:none}
+  .stick .knob{position:absolute;left:50%;top:50%;width:84px;height:84px;border-radius:50%;background:#0e1b3dcc;border:1px solid #2c4f9a;transform:translate(-50%,-50%)}
+  .toast{position:absolute;left:50%;top:12%;transform:translateX(-50%);background:#0f1736ee;border:1px solid #254084;border-radius:12px;padding:8px 12px;box-shadow:0 10px 30px #000a;display:none}
+  .badge{position:absolute;right:16px;top:14px;background:#0a1330cc;border:1px solid #284a92;border-radius:12px;padding:6px 10px;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div id="score" class="pill">Score 0</div>
+    <div class="right">
+      <div id="hp" class="pill">HP 100</div>
+      <div id="dash" class="pill">Dash READY</div>
+      <div id="btnSfx" class="ib" role="button" aria-label="Sound">🔊</div>
+      <div id="btnFS" class="ib" role="button" aria-label="Fullscreen">⛶</div>
+    </div>
+  </header>
+  <div class="card">
+    <canvas id="cv" width="960" height="540"></canvas>
+    <div class="ui">
+      <div class="badge" id="combo">x1.0</div>
+      <div class="toast" id="toast">Nice Juke!</div>
+      <div class="stick" id="stick"><div class="knob" id="knob"></div></div>
+      <button class="dash" id="btnDash">DASH</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- PWA register ----
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(()=>{});
+  });
+}
+
+// ===== Core =====
+const DPR = Math.min(2, window.devicePixelRatio||1);
+const cv=document.getElementById('cv'), cx=cv.getContext('2d');
+const scoreEl=document.getElementById('score'), hpEl=document.getElementById('hp'), dashEl=document.getElementById('dash'), comboEl=document.getElementById('combo');
+const btnDash=document.getElementById('btnDash'), stick=document.getElementById('stick'), knob=document.getElementById('knob');
+const btnSfx=document.getElementById('btnSfx'), btnFS=document.getElementById('btnFS'), toast=document.getElementById('toast');
+
+function fitCanvas(){
+  const r = cv.getBoundingClientRect(); const w = Math.floor(r.width*DPR), h = Math.floor((r.height||r.width*9/16)*DPR);
+  if(cv.width!==w||cv.height!==h){ cv.width=w; cv.height=h; }
+}
+fitCanvas(); addEventListener('resize', fitCanvas);
+
+// ===== Utils =====
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const hsv=(h,s,v)=>{const i=Math.floor(h*6),f=h*6-i,p=v*(1-s),q=v*(1-f*s),t=v*(1-(1-f)*s);const m=[[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][i%6];return `rgb(${(m[0]*255)|0},${(m[1]*255)|0},${(m[2]*255)|0})`;};
+const now=()=>performance.now()/1000;
+const vibe=(a)=>{ try{ if(navigator.vibrate) navigator.vibrate(a); }catch{} }
+function showToast(t){ toast.textContent=t; toast.style.display='block'; clearTimeout(showToast.t); showToast.t=setTimeout(()=>toast.style.display='none', 900); }
+
+// ===== Audio (vine boom-like for dash/juke) =====
+let MUTE=false;
+const SND=(()=>{
+  let ctx=null, boom=null; const init=()=>{ if(!ctx) ctx=new (window.AudioContext||window.webkitAudioContext)(); return ctx; };
+  function mkBoom(){ const c=init(), sr=c.sampleRate, secs=.5, n=(secs*sr)|0, b=c.createBuffer(1,n,sr), ch=b.getChannelData(0);
+    for(let i=0;i<n;i++){ const t=i/sr, f=160*Math.pow(50/160, t/secs); let x=Math.sin(2*Math.PI*f*t)+.35*Math.sin(2*Math.PI*2*f*t); const env=Math.min(1,t/.02)*(1-t/secs); ch[i]=Math.tanh(2*x*env*.9); } return b; }
+  function play(buf,vol=.9){ if(MUTE) return; const c=init(); const s=c.createBufferSource(); s.buffer=buf; const g=c.createGain(); g.gain.value=vol; s.connect(g).connect(c.destination); s.start(); }
+  return { boom:(v=.9)=>{ boom||(boom=mkBoom()); play(boom,v); }, toggle(){ MUTE=!MUTE; btnSfx.textContent=MUTE?'🔇':'🔊'; init().resume(); } }
+})();
+btnSfx.onclick=()=>SND.toggle();
+btnFS.onclick=()=>{ const el=document.documentElement; if(!document.fullscreenElement) el.requestFullscreen?.(); else document.exitFullscreen?.(); };
+
+// ===== Game Config =====
+const FIELD=24;
+const Config={
+  PLAYER_MAX_HP:100, PLAYER_SPEED:260, PLAYER_SPEED_BOOST:380,
+  DASH_SPEED:900, DASH_TIME:.18, DASH_CD:1.0,
+  CHASER_TOP:210, CHASER_ACCEL:560, CHASER_TURN:Math.PI*360/180,
+  TOUCH_DMG:36, IFRAME:.7, SCORE_RATE:10, JUMP_TIME:1.0, SHAKE:14,
+  POW_SPAWN: .12
+};
+
+// ===== State =====
+const P={x:cv.width*0.25,y:cv.height*0.5,vx:0,vy:0,ang:0,hp:Config.PLAYER_MAX_HP,if:0,dashT:0,dashCD:0,lx:0,ly:0};
+const C={x:cv.width*0.75,y:cv.height*0.5,vx:-120,vy:0,ang:0};
+let score=0,hue=0,nearT=0,jukeCD=0,combo=1,comboT=0,state='PLAY',jumpT=0;
+const powerups=[]; // {kind,x,y,vy}
+
+// ===== Touch Joystick =====
+const stickState={id:null,ox:0,oy:0,dx:0,dy:0};
+function stickStart(e){
+  const t=(e.changedTouches?e.changedTouches[0]:e); if(stickState.id) return;
+  stickState.id=t.identifier||'mouse'; const r=stick.getBoundingClientRect();
+  stickState.ox=r.left+r.width/2; stickState.oy=r.top+r.height/2; stickMove(e);
+}
+function stickMove(e){
+  if(!stickState.id) return;
+  const ts=e.touches?Array.from(e.touches):[e]; const t=ts.find(t=> (t.identifier||'mouse')===stickState.id); if(!t) return;
+  const r=stick.getBoundingClientRect(); let dx=(t.clientX-(r.left+r.width/2)), dy=(t.clientY-(r.top+r.height/2));
+  const lim=r.width*0.35; const d=Math.hypot(dx,dy); if(d>lim){ dx=dx/d*lim; dy=dy/d*lim; }
+  document.getElementById('knob').style.transform=`translate(${dx}px,${dy}px)`;
+  stickState.dx=dx/lim; stickState.dy=dy/lim; e.preventDefault();
+}
+function stickEnd(e){
+  const id=(e.changedTouches?e.changedTouches[0].identifier:'mouse'); if(id!==stickState.id) return;
+  stickState.id=null; stickState.dx=0; stickState.dy=0; document.getElementById('knob').style.transform='translate(-50%,-50%)';
+}
+document.getElementById('stick').addEventListener('touchstart',stickStart,{passive:false});
+document.getElementById('stick').addEventListener('touchmove',stickMove,{passive:false});
+document.getElementById('stick').addEventListener('touchend',stickEnd);
+document.getElementById('stick').addEventListener('mousedown',stickStart);
+addEventListener('mousemove',e=>{ if(stickState.id==='mouse') stickMove(e); });
+addEventListener('mouseup',e=>{ if(stickState.id==='mouse') stickEnd(e); });
+
+document.getElementById('btnDash').onclick=()=>tryDash();
+
+// ===== Input (keyboard fallback) =====
+const Keys=new Set();
+addEventListener('keydown',e=>{ Keys.add(e.key.toLowerCase()); if(e.key==='Shift') tryDash(); if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) e.preventDefault(); });
+addEventListener('keyup',e=>Keys.delete(e.key.toLowerCase()));
+
+// ===== Logic =====
+function resetPositions(){
+  P.x=cv.width*0.25; P.y=cv.height*0.5; C.x=cv.width*0.75; C.y=cv.height*0.5;
+  C.vx=-120; C.vy=0; C.ang=0;
+}
+function tryDash(){
+  if(state!=='PLAY') return;
+  if(P.dashT>0) return;
+  if(P.dashCD>0) return;
+  const len=Math.hypot(P.lx,P.ly);
+  let dx=len?P.lx/len:Math.cos(P.ang), dy=len?P.ly/len:Math.sin(P.ang);
+  P.vx=dx*Config.DASH_SPEED; P.vy=dy*Config.DASH_SPEED;
+  P.dashT=Config.DASH_TIME; P.dashCD=Config.DASH_CD;
+  SND.boom(.85); try{navigator.vibrate&&navigator.vibrate(40)}catch{}
+}
+
+function update(dt){
+  if(state==='JUMP'){ jumpT+=dt; if(jumpT>=Config.JUMP_TIME){ state='OVER'; } }
+  if(state!=='PLAY') return;
+
+  // hue
+  hue=(hue+dt*0.25)%1;
+
+  // input vector from stick + keys
+  let mx=(Keys.has('d')||Keys.has('arrowright')?1:0)-(Keys.has('a')||Keys.has('arrowleft')?1:0);
+  let my=(Keys.has('s')||Keys.has('arrowdown')?1:0)-(Keys.has('w')||Keys.has('arrowup')?1:0);
+  if(stickState.id){ mx=stickState.dx; my=stickState.dy; }
+  let l=Math.hypot(mx,my); let vx=0, vy=0;
+  if(l>0.01){ vx=mx/l; vy=my/l; P.lx=vx; P.ly=vy; }
+  if(P.dashT>0){ P.dashT=Math.max(0,P.dashT-dt); P.vx*=0.985; P.vy*=0.985; }
+  else{ const sp=Config.PLAYER_SPEED; P.vx=vx*sp; P.vy=vy*sp; }
+  P.x+=P.vx*dt; P.y+=P.vy*dt;
+  if(l>0.01){ P.ang=Math.atan2(P.ly, P.lx); } else { P.ang = Math.atan2((cv.height/2)-P.y, (cv.width/2)-P.x); }
+  P.x=clamp(P.x,24,cv.width-24); P.y=clamp(P.y,24,cv.height-24);
+  P.if=Math.max(0,P.if-dt); P.dashCD=Math.max(0,P.dashCD-dt);
+
+  // chaser
+  const da=Math.atan2(P.y-C.y, P.x-C.x);
+  let turn=((da - C.ang + Math.PI)%(2*Math.PI))-Math.PI;
+  C.ang += Math.max(-Config.CHASER_TURN*dt, Math.min(Config.CHASER_TURN*dt, turn));
+  const fx=Math.cos(C.ang), fy=Math.sin(C.ang);
+  const dvx=fx*Config.CHASER_TOP - C.vx, dvy=fy*Config.CHASER_TOP - C.vy;
+  const len2=Math.hypot(dvx,dvy); if(len2>0){ const step=Math.min(Config.CHASER_ACCEL*dt,len2); C.vx+=dvx/len2*step; C.vy+=dvy/len2*step; }
+  C.x+=C.vx*dt; C.y+=C.vy*dt;
+  C.x=clamp(C.x,24,cv.width-24); C.y=clamp(C.y,24,cv.height-24);
+
+  // score
+  score += Config.SCORE_RATE * dt;
+
+  // juke detection
+  const d=Math.hypot(P.x-C.x, P.y-C.y);
+  if(d<70) nearT+=dt; else { if(nearT>0.2 && d>110 && jukeCD<=0){ SND.boom(.9); combo=Math.min(5, combo+0.25); comboT=1.6; jukeCD=.5; showToast('Nice Juke!'); try{navigator.vibrate&&navigator.vibrate([10,50,10])}catch{} } nearT=0; }
+  jukeCD=Math.max(0,jukeCD-dt); comboT=Math.max(0,comboT-dt);
+  // collision
+  if(d<=22 && P.if<=0){
+    if(P.hp>0){ P.hp = Math.max(0, P.hp-Config.TOUCH_DMG); P.if=Config.IFRAME; try{navigator.vibrate&&navigator.vibrate(60)}catch{} }
+    if(P.hp<=0){ state='JUMP'; jumpT=0; }
+  }
+}
+
+function drawGrid(){
+  cx.fillStyle='#0c1222'; cx.fillRect(0,0,cv.width,cv.height);
+  const col=hsv(hue,1,1);
+  cx.fillStyle=col; cx.globalAlpha=.08; cx.fillRect(0,0,cv.width,cv.height); cx.globalAlpha=1;
+  cx.strokeStyle=hsv((hue+.1)%1,.3,.7); cx.lineWidth=1;
+  for(let x=24;x<cv.width-24;x+=Math.max(32, Math.floor(cv.width/30))){ cx.beginPath(); cx.moveTo(x,24); cx.lineTo(x,cv.height-24); cx.stroke(); }
+  for(let y=24;y<cv.height-24;y+=Math.max(32, Math.floor(cv.height/18))){ cx.beginPath(); cx.moveTo(24,y); cx.lineTo(cv.width-24,y); cx.stroke(); }
+  cx.strokeStyle=col; cx.lineWidth=2; cx.strokeRect(23.5,23.5,cv.width-47,cv.height-47);
+}
+
+function drawPlayer(){
+  cx.save(); cx.translate(P.x,P.y); cx.rotate(P.ang);
+  cx.fillStyle='#3a9bd9'; cx.beginPath(); cx.arc(0,4,14,0,6.28); cx.fill();
+  cx.fillStyle='#f7f7f7'; cx.beginPath(); cx.arc(0,-6,10,Math.PI,0); cx.fill();
+  cx.fillStyle='#ffe4c7'; cx.beginPath(); cx.arc(0,-2,9,0,6.28); cx.fill();
+  cx.fillStyle='#1a1a1a'; cx.beginPath(); cx.arc(-3,-5,1.6,0,6.28); cx.arc(3,-5,1.6,0,6.28); cx.fill();
+  cx.restore();
+}
+
+function drawChaser(){
+  cx.save(); cx.translate(C.x,C.y); cx.rotate(C.ang);
+  cx.fillStyle='#1e1e1e'; cx.beginPath(); cx.arc(0,3,24,0,6.28); cx.fill();
+  cx.fillStyle='#ff4444'; cx.beginPath(); cx.arc(-3,-12,2,0,6.28); cx.arc(3,-12,2,0,6.28); cx.fill();
+  cx.restore();
+}
+
+function render(){
+  drawGrid(); drawPlayer(); drawChaser();
+  // HUD text
+  scoreEl.textContent = 'Score ' + Math.floor(score);
+  hpEl.textContent = 'HP ' + Math.max(0, Math.floor(P.hp));
+  dashEl.textContent = 'Dash ' + (P.dashCD<=0?'READY':P.dashCD.toFixed(1)+'s');
+  comboEl.textContent = 'x' + combo.toFixed(1);
+  if(P.dashT>0){ const a=P.dashT/Config.DASH_TIME; cx.fillStyle=`rgba(160,200,255,${.15*a})`; cx.fillRect(0,0,cv.width,cv.height); }
+}
+
+let last=now();
+function loop(){ fitCanvas(); const t=now(); let dt=Math.min(.05, t-last); last=t; if(dt<0) dt=0.016;
+  update(dt); render(); requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
